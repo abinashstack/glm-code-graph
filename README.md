@@ -1,5 +1,7 @@
 # GLM Code Graph - Token Reduction Demonstration
 
+![token reduction](https://img.shields.io/badge/token_reduction-48%25_on_4--file_demo-2f7d4f)
+
 ## Overview
 
 This repository demonstrates **blast radius analysis** for code review: instead of
