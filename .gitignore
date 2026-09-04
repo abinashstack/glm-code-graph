@@ -36,6 +36,3 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
-
-# Test files (optional - can be included or excluded)
-test_*.py
