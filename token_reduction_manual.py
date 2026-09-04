@@ -27,15 +27,16 @@ def main() -> None:
     print(" " * 18 + "TOKEN REDUCTION VERIFICATION")
     print("=" * 64)
 
-    print("\n[1] Modules in the graph and their first-party imports:")
+    print("\n[1] Files in the graph and their first-party imports:")
     for name in sorted(graph.modules):
         mod = graph.modules[name]
         deps = ", ".join(sorted(mod.imports)) or "-"
         tag = " (test)" if mod.is_test else ""
-        print(f"    {name + '.py':<28}{tag:<8} imports: {deps}")
+        print(f"    {name:<28} {mod.language:<8}{tag:<8} imports: {deps}")
 
     edges = sum(len(v) for v in graph.forward.values())
-    print(f"\n[2] {len(graph.modules)} modules, {edges} first-party import edge(s)")
+    print(f"\n[2] {len(graph.modules)} files, {edges} first-party import edge(s)"
+          f"  ({graph.stats['parsed']} parsed, {graph.stats['cached']} from cache)")
 
     result = select(REPO, changed, max_depth=depth, token_budget=budget, graph=graph)
     print(f"\n[3] Reviewing: {', '.join(result.review)}  (max_depth={depth})")

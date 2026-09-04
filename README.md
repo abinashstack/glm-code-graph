@@ -25,8 +25,26 @@ reviewer (human or model) needs to read:
    lowest-priority files (farthest hop, lowest PageRank) are dropped. Changed
    files are never dropped.
 
-Imports are read from the **AST**, so aliased imports, `from x import *`, and
-function-local imports are all detected — a line-prefix string scan misses them.
+Imports are read from a real parser (AST for Python, tree-sitter for the
+others), so aliased imports, `from x import *`, and function-local imports are
+all detected — a line-prefix string scan misses them.
+
+**Multi-language.** Python needs nothing extra (stdlib `ast`). JavaScript,
+TypeScript and Go are parsed with [tree-sitter](https://tree-sitter.github.io/)
+when the matching grammar is installed:
+
+```bash
+pip install tree-sitter tree-sitter-javascript tree-sitter-typescript tree-sitter-go
+```
+
+Without a grammar installed, files in that language are skipped (isolated
+nodes) rather than crashing the build — the graph degrades, it doesn't break.
+
+**Incremental.** Each file's parse result is cached by content hash in
+`.blast_radius_cache.json`. Rebuilding re-parses only files that changed since
+the last run; import *resolution* is always recomputed against the live file
+set, so adding a new file is picked up immediately even for files that weren't
+touched and whose parse came from cache.
 
 ### Example
 
@@ -52,7 +70,9 @@ toy repo but 90%+ of a real one. The engineering that matters on real code is
 ### Prerequisites
 
 - Git
-- Python 3.8+ (for the verification scripts)
+- Python 3.10+ (for the verification scripts)
+- Optional: `pip install -r requirements-languages.txt` for JS/TS/Go parsing
+  and exact token counts. Python-only analysis needs nothing extra.
 
 ### Quick Setup
 
@@ -72,25 +92,48 @@ python count_bytes.py
 ```
 glm-code-graph/
 ├── README.md
-├── blast_radius.py             # The analysis: graph build + reverse closure + trim
+├── blast_radius.py             # The analysis: multi-language graph, cache, reverse closure, trim
 ├── test_blast_radius.py        # Verification (python test_blast_radius.py)
 ├── count_bytes.py              # CLI: reduction for a change
 ├── token_reduction_manual.py   # CLI: verbose, shows the graph
 ├── token_benchmark.py          # CLI: side-by-side token comparison (needs tiktoken)
-├── auth.py                     # Mock code under review: auth + tokens (imports config)
-├── config.py                   # Mock: configuration
-├── user.py                     # Mock: user service
-└── database.py                 # Mock: database layer
+├── .claude/skills/blast-radius/SKILL.md  # Claude Code / GLM-skills-format skill
+├── auth.py                     # Mock Python: auth + tokens (imports config.py)
+├── config.py                   # Mock Python: configuration
+├── user.py                     # Mock Python: user service
+├── database.py                 # Mock Python: database layer
+├── go.mod                      # Mock Go module ("glmdemo")
+├── service/
+│   ├── handler.go              # Mock Go: imports the util package
+│   └── util/helper.go          # Mock Go: a separate package
+└── web/
+    ├── utils.js                 # Mock JS: no first-party imports
+    ├── app.js                   # Mock JS: `require('./utils')`
+    └── format.ts                # Mock TS: `import ... from './utils.js'`
 ```
 
-The `.ps1`, `.bat`, `.sh`, `.cs` and `.js` files are older single-file ports of
-the byte-count estimate and are not wired to `blast_radius.py`.
+The `.ps1`, `.bat`, `.sh` and `.cs` files are older single-file ports of the
+byte-count estimate and are not wired to `blast_radius.py`.
+`.blast_radius_cache.json` is generated at the repo root on first run and is
+gitignored.
 
 ## How It Works
 
-`blast_radius.build_graph()` parses every `*.py` file with the `ast` module,
-recording each module's first-party imports and top-level symbols. Edges are
-`A imports B`; the reverse index gives `B is imported by A`.
+`blast_radius.build_graph()` walks the repo, and for each `.py`/`.js`/`.jsx`/
+`.ts`/`.tsx`/`.go` file:
+
+1. Hashes its content and checks `.blast_radius_cache.json` for a hit. On a
+   hit, reuses the cached raw import list; on a miss, parses fresh (`ast` for
+   Python, tree-sitter for the rest) and updates the cache entry.
+2. Resolves each raw import specifier against the *current* repo file set —
+   Python by bare-name match on file stem, JS/TS by relative-path resolution
+   (`./x`, `../x/y`, trying `index.*` and known extensions), Go by `go.mod`'s
+   module path (an import resolves to every non-test file in that package
+   directory, since Go imports name a package, not a file).
+
+Nodes are keyed by repo-relative path, not filename stem, so two files named
+`util.py` in different packages don't collide. Edges are `A imports B`; the
+reverse index gives `B is imported by A`.
 
 `blast_radius.select(root, changed, max_depth, token_budget)` then:
 
@@ -166,34 +209,30 @@ Based on GLM-4 pricing ($0.00001/token):
 
 ### Source Files
 
-The repository contains a mock authentication system:
+**Python** — a mock authentication system: `auth.py` (imports `config.py`),
+`config.py`, `user.py`, `database.py` (both unrelated to `auth.py`).
 
-**auth.py** (2,436 bytes)
-- Handles authentication and token management
-- Imports `logger` module
+**Go** (`go.mod` module `glmdemo`) — `service/handler.go` imports the package
+`service/util` (`service/util/helper.go`).
 
-**user.py** (1,809 bytes)
-- User management functions
-- Unrelated to auth changes
+**JavaScript/TypeScript** — `web/app.js` and `web/format.ts` both
+`require`/`import` `web/utils.js`.
 
-**database.py** (2,527 bytes)
-- Database operations
-- No imports from auth module
-
-**config.py** (1,724 bytes)
-- Configuration settings
-- No imports from auth module
-
-**test_auth.py** (2,899 bytes)
-- Tests for auth module
-- Should be reviewed (detected by pattern matching)
+There is no `test_auth.py` or `logger.py` in this repo, despite what an
+earlier version of this README claimed — every number here is reproducible by
+running the scripts yourself.
 
 ### Blast Radius Results
 
-When reviewing `auth.py`:
-- **Includes**: `auth.py`, `logger.py` (and test files)
-- **Excludes**: `user.py`, `database.py`, `config.py`
-- **Result**: 6 files saved (75% reduction)
+| Changed | Radius | Reduction |
+|---|---|---|
+| `auth.py` | `auth.py`, `config.py` | 53.8% (of 9 files) |
+| `service/util/helper.go` | + `service/handler.go` | 95.7% |
+| `web/utils.js` | + `web/app.js`, `web/format.ts` | 93.5% |
+
+Reduction rises with the number of files *not* pulled into the radius — it's a
+property of the repo's size and shape, not a fixed constant. Reproduce these
+with `python token_benchmark.py <file>`.
 
 ## Why This Matters
 
@@ -214,37 +253,27 @@ When reviewing `auth.py`:
 
 ## Extending the System
 
-This repository demonstrates the concept. To build a production-ready version:
+`blast_radius.py` implements the engine (AST/tree-sitter parsing, the reverse
+dependency graph, PageRank, incremental caching) and ships Python, JS/TS and Go
+support. What's still a genuine extension, not a demo:
 
-1. **Implement the blast radius engine:**
-   - Use Tree-sitter for parsing
-   - Build dependency graph (call graphs, import graphs)
-   - Calculate blast radius with configurable depth
-
-2. **Integrate with GLM-4:**
-   - Use streaming API
-   - Optimize context window (128k-256k tokens)
-   - Implement prompt caching
-
-3. **Add CI/CD integration:**
-   - Git hooks for automated reviews
-   - Pull request checks
-   - PR comment automation
-
-4. **Multi-language support:**
-   - Extend to JavaScript, TypeScript, Go, etc.
-   - Update parsers for each language
+1. **Integrate with GLM-4:** stream `select()`'s file list straight into a
+   review prompt; optimize for GLM-4's context window; add prompt caching for
+   files that recur across reviews.
+2. **CI/CD integration:** a git pre-push hook or PR check that runs
+   `count_bytes.py` against the diff's changed files and posts the radius as a
+   PR comment.
+3. **More languages:** add an entry to `EXT_LANGUAGE`, a raw-import extractor,
+   and a resolver in `blast_radius.py` — Java and Rust are the natural next
+   ones (Java needs a source-root heuristic; Rust's `mod`/`use` resolution is
+   closer to Go's).
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
-
-- [ ] Add more example codebases
-- [ ] Implement actual blast radius engine
-- [ ] Create CI/CD integration examples
-- [ ] Add support for more languages
-- [ ] Benchmark performance
-- [ ] Write unit tests
+- [ ] CI/CD integration example (git hook or GitHub Action)
+- [ ] Java / Rust language support
+- [ ] Benchmark on a real (non-demo) repository
+- [ ] Symbol-level nodes (function/class, not whole file)
 
 ## License
 

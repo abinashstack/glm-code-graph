@@ -42,7 +42,7 @@ def main() -> None:
     print("METHOD 1: Traditional review (read every source file)")
     print("-" * 60)
     for p in sorted(src_files, key=lambda p: -count(p.read_text(encoding='utf-8'))):
-        print(f"  {p.name:<26} {count(p.read_text(encoding='utf-8')):>6,} tok")
+        print(f"  {p.relative_to(REPO).as_posix():<26} {count(p.read_text(encoding='utf-8')):>6,} tok")
     print(f"  {'TOTAL':<26} {full_tokens:>6,} tok  ({len(src_files)} files)")
 
     print("\n" + "-" * 60)

@@ -1,0 +1,11 @@
+# Optional. blast_radius.py works on Python alone with zero dependencies
+# (stdlib `ast`). Install this to also parse JavaScript/TypeScript/Go imports
+# via tree-sitter; without it, files in those languages are skipped as
+# isolated nodes rather than crashing the graph build.
+tree-sitter>=0.24
+tree-sitter-javascript>=0.23
+tree-sitter-typescript>=0.23
+tree-sitter-go>=0.23
+
+# Optional. Exact token counts (cl100k_base) instead of a bytes/4 estimate.
+tiktoken>=0.7

@@ -36,3 +36,6 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# blast_radius.py's incremental parse cache -- regenerates on first run
+.blast_radius_cache.json
