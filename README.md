@@ -2,26 +2,48 @@
 
 ## Overview
 
-This repository demonstrates the token reduction capabilities of the GLM Code Graph architecture, showing how blast radius analysis can reduce code review token usage by **90%+** compared to traditional approaches.
+This repository demonstrates **blast radius analysis** for code review: instead of
+feeding an LLM the whole codebase, feed it only the files a given change can affect.
+The analysis lives in [`blast_radius.py`](blast_radius.py); the other scripts are
+presentation over it.
 
 ## What is GLM Code Graph?
 
-GLM Code Graph is a token-optimized code review system that uses blast radius analysis to only read and analyze the minimum set of files needed for a code review, rather than reading entire codebases.
+Given a set of changed files, GLM Code Graph returns the minimal set of files a
+reviewer (human or model) needs to read:
 
-### Traditional Review vs GLM Code Graph
+1. **Reverse dependency closure.** The modules that *import* the changed one, then
+   the modules that import *those*, bounded by `--depth` (default 3). This is the
+   "what could my change break" set — the opposite direction from the change's own
+   imports.
+2. **Plus direct dependencies.** The modules the change itself imports (one hop),
+   as context for understanding the change.
+3. **Plus covering tests.** Any test module that imports something in the closure.
+4. **Trimmed to a token budget.** When the set overflows `--budget`, the
+   lowest-priority files (farthest hop, lowest PageRank) are dropped. Changed
+   files are never dropped.
 
-**Traditional Approach:**
+Imports are read from the **AST**, so aliased imports, `from x import *`, and
+function-local imports are all detected — a line-prefix string scan misses them.
+
+### Example
+
 ```
-Read all 8 files → 7,686 tokens → $0.08 per review
+$ python token_benchmark.py auth.py
+
+METHOD 1: Traditional review (read every source file)
+  auth.py 487  database.py 454  config.py 403  user.py 375   TOTAL 1,719 tok (4 files)
+
+METHOD 2: Blast radius
+  auth.py 487   changed
+  config.py 403 dependency of the change                     TOTAL   890 tok (2 files)
+
+  reduction: 48.2%
 ```
 
-**GLM Code Graph (Blast Radius):**
-```
-Review auth.py → Find imports → auth.py + logger.py
-Read 2 files → 734 tokens → $0.007 per review
-```
-
-**Result:** 90.4% token reduction ($0.07 saved per review)
+The reduction scales with repo size: the same 2-file radius is ~48% of a 4-file
+toy repo but 90%+ of a real one. The engineering that matters on real code is
+*bounding* the closure, which this demo's tiny graph never stresses.
 
 ## Installation
 
@@ -46,39 +68,57 @@ python count_bytes.py
 ### Directory Structure
 
 ```
-glm-code-graph-demo/
-├── README.md                    # This file
-├── VERIFICATION.md             # Technical verification details
-├── token_reduction.bat         # Windows batch verification
-├── TokenReduction.ps1          # PowerShell verification
-├── count_bytes.py              # Python verification script
-├── token_calc.sh               # Shell calculation script
-├── auth.py                     # Example authentication module
-├── user.py                     # Example user module
-├── database.py                 # Example database module
-├── config.py                   # Example configuration
-└── test_auth.py                # Example test file
+glm-code-graph/
+├── README.md
+├── blast_radius.py             # The analysis: graph build + reverse closure + trim
+├── test_blast_radius.py        # Verification (python test_blast_radius.py)
+├── count_bytes.py              # CLI: reduction for a change
+├── token_reduction_manual.py   # CLI: verbose, shows the graph
+├── token_benchmark.py          # CLI: side-by-side token comparison (needs tiktoken)
+├── auth.py                     # Mock code under review: auth + tokens (imports config)
+├── config.py                   # Mock: configuration
+├── user.py                     # Mock: user service
+└── database.py                 # Mock: database layer
 ```
+
+The `.ps1`, `.bat`, `.sh`, `.cs` and `.js` files are older single-file ports of
+the byte-count estimate and are not wired to `blast_radius.py`.
 
 ## How It Works
 
-### Blast Radius Analysis
+`blast_radius.build_graph()` parses every `*.py` file with the `ast` module,
+recording each module's first-party imports and top-level symbols. Edges are
+`A imports B`; the reverse index gives `B is imported by A`.
 
-The core innovation is the **blast radius** concept:
+`blast_radius.select(root, changed, max_depth, token_budget)` then:
 
-1. **Identify changed files** (e.g., `auth.py`)
-2. **Analyze imports** (e.g., `auth.py` imports `logger`)
-3. **Collect dependent files** (e.g., `auth.py`, `logger.py`)
-4. **Skip unrelated files** (e.g., `user.py`, `database.py`)
+1. BFS over the **reverse** edges from each changed module, tagging every module
+   with its hop distance (stop at `max_depth`).
+2. Adds one forward hop (direct dependencies) and covering test modules.
+3. Ranks by `(hop distance, -PageRank)` and drops from the tail until the token
+   total fits `token_budget`.
+
+`PageRank` is computed on the forward graph — a module scores high when many
+important modules depend on it — and is used only for tie-breaking during the
+trim.
 
 ### Token Calculation
 
-```
-1 token ≈ 4 bytes for Python code
-```
+Counts use `tiktoken`'s `cl100k_base` encoding when installed, otherwise a
+`bytes / 4` estimate.
 
-**Traditional:** Read 8 files (30,743 bytes) → 7,686 tokens  
-**GLM:** Read 2 files (2,936 bytes) → 734 tokens
+### API
+
+```python
+from blast_radius import select, format_report, TOOLING
+
+# exclude=TOOLING drops this repo's own analysis scripts from the graph, so the
+# baseline is just the mock auth code (auth/config/user/database). The CLIs do this.
+sel = select(".", ["auth.py"], max_depth=3, token_budget=8000, exclude=TOOLING)
+print(format_report(sel))
+print(sel.files)            # ['auth.py', 'config.py']
+print(round(sel.token_reduction, 1))  # 48.2
+```
 
 ## Usage
 
