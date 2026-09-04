@@ -286,16 +286,33 @@ def _resolve_python_relative(level: int, module: str, name: str, file_rel: str, 
     return []
 
 
+def _resolve_python_absolute(raw: str) -> list[str]:
+    """`import a.b.c` / `from a.b import c` as a package path from the repo
+    root: a.b -> a/b.py or a/b/__init__.py, candidates for the caller to check
+    against the live file set. This is how Python absolute imports actually
+    map to files whenever the repo root is (as it usually is) the directory
+    holding the top-level first-party packages -- so it also correctly
+    handles the flat case (`import config` -> `config.py`) as a one-segment
+    path, not just multi-segment package imports.
+    """
+    as_path = raw.replace(".", "/")
+    return [as_path + ".py", as_path + "/__init__.py"]
+
+
 def _resolve_python(raw: str, file_rel: str, idx: IndexData) -> list[str]:
     if raw.startswith("REL:"):
         _, level_s, module, name = raw.split(":", 3)
         return _resolve_python_relative(int(level_s), module, name, file_rel, idx)
-    # Bare/absolute import (`import a.b`, `from a.b import c`): resolved by a
-    # repo-wide match on the first dotted segment's filename stem. This is a
-    # best-effort heuristic for a flat or simple package layout -- if two
-    # files anywhere in the repo share that stem, resolution is genuinely
-    # ambiguous without modeling sys.path/package structure, so it's skipped
-    # rather than guessing which one.
+    # Bare/absolute import (`import a.b`, `from a.b import c`). Try it first as
+    # a package path anchored at the repo root (the common case, including
+    # `from app.parser import x` in an `app/` package). Fall back to a
+    # repo-wide match on the first dotted segment's filename stem for a flat
+    # layout where that doesn't apply -- if two files anywhere in the repo
+    # share that stem, resolution is genuinely ambiguous without modeling
+    # sys.path/package structure, so it's skipped rather than guessing which one.
+    for candidate in _resolve_python_absolute(raw):
+        if candidate in idx.all_paths:
+            return [candidate]
     matches = idx.py_stem_index.get(raw.split(".")[0])
     return matches if matches and len(matches) == 1 else []
 
@@ -596,12 +613,29 @@ def format_report(sel: Selection) -> str:
     return "\n".join(lines)
 
 
+def _cli_usage() -> str:
+    return ("usage: python blast_radius.py <changed_file> [<changed_file2> ...] "
+            "[--root=PATH] [--budget=N] [--depth=N]\n\n"
+            "  --root=PATH   repo to analyze (default: current directory --\n"
+            "                useful when this script is invoked from elsewhere,\n"
+            "                e.g. a Claude Code skill bundled outside the repo)\n"
+            "  --budget=N    cap the total token count\n"
+            "  --depth=N     reverse-import hops to follow (default 3)")
+
+
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
-    changed = args or ["auth.py"]
-    budget = None
-    for a in sys.argv[1:]:
-        if a.startswith("--budget="):
-            budget = int(a.split("=", 1)[1])
-    result = select(Path(__file__).parent, changed, token_budget=budget, exclude=TOOLING)
+    changed = [a for a in sys.argv[1:] if not a.startswith("-")]
+    if not changed:
+        print(_cli_usage(), file=sys.stderr)
+        raise SystemExit(2)
+    root = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--root=")), None)
+    budget = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--budget=")), None)
+    depth = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("--depth=")), 3)
+    # exclude=TOOLING only matters when this script sits inside the repo it's
+    # analyzing (the glm-code-graph demo); it's a no-op filename filter
+    # elsewhere. --root defaults to cwd, not this file's own directory, so
+    # the same script works whether it's copied into a repo or invoked by
+    # absolute path (e.g. from a user-level Claude Code skill) against
+    # whatever project is currently open.
+    result = select(root or Path.cwd(), changed, max_depth=depth, token_budget=budget, exclude=TOOLING)
     print(format_report(result))

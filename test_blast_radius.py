@@ -68,6 +68,22 @@ def test_budget_trim_is_a_priority_prefix():
         shutil.rmtree(work)
 
 
+def test_absolute_package_import_resolves_to_a_submodule():
+    # `from app.parser import x` (a package-style absolute import, extremely
+    # common in real repos) must resolve to app/parser.py -- not require a
+    # bare `app.py` at the repo root, which is what a naive
+    # first-segment-only stem match would look for instead.
+    work = Path(tempfile.mkdtemp())
+    try:
+        (work / "app").mkdir()
+        (work / "app" / "parser.py").write_text("def extract(): pass\n")
+        (work / "app" / "main.py").write_text("from app.parser import extract\n")
+        graph = build_graph(work)
+        assert graph.modules["app/main.py"].imports == {"app/parser.py"}
+    finally:
+        shutil.rmtree(work)
+
+
 def test_relative_import_resolves_within_its_own_package():
     # `from . import utils` in pkg1/mod.py must resolve to pkg1/utils.py --
     # specifically, not by a repo-wide name search that would find pkg2's
